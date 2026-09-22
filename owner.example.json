@@ -1,0 +1,14 @@
+{
+  "name": "Your Name",
+  "phone": "+1 555 555 5555",
+  "email": "you@example.com",
+  "portfolio": "https://yoursite.example",
+  "location_use": "Remote - City, ST 00000 (US)",
+  "timezones": "US Eastern; able to align to any continental-US timezone",
+  "available": "available immediately upon offer; two weeks' notice negotiable",
+  "relocate": "seeking fully remote; based in the US",
+  "target_salary_min": 60000,
+  "resume_pdf": "YOURNAME_Resume.pdf",
+  "resume_path": "/absolute/path/to/YOURNAME_Resume.pdf",
+  "tracker_out": "/absolute/path/to/job_tracker.xlsx"
+}

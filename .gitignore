@@ -1,0 +1,16 @@
+# personal identity + live data (never publish)
+owner.json
+profile.json
+postings.json
+seen.json
+fresh.json
+state.json
+board_status.json
+
+# generated artifacts
+kits/
+logs/
+__pycache__/
+*.pyc
+*.xlsx
+*.resume

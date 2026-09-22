@@ -1,0 +1,40 @@
+{
+  "skill_bullets": {
+    "Linux": "Describe your own Linux/cloud experience here.",
+    "Cloud/Virtualization": "Describe your cloud & virtualization experience.",
+    "Desktop/Endpoint": "Describe your endpoint/desktop support experience.",
+    "Windows/AD/SCCM": "Describe your Windows/AD experience.",
+    "Networking (TCP/IP/VLAN)": "Describe your networking experience.",
+    "Security/InfoSec": "Describe security-related experience.",
+    "SQL/Databases": "Describe SQL/data experience.",
+    "AI/ML/OCR": "Describe AI/ML experience.",
+    "DevOps/Containers": "Describe container/DevOps experience.",
+    "App Support/Implementation": "Describe app-support experience.",
+    "Bilingual": "Describe languages spoken.",
+    "Remote Discipline": "Describe your remote-work discipline."
+  },
+  "lane_openers": {
+    "IT Ops": "Your opening line for IT operations roles.",
+    "DevOps/Cloud": "Your opening line for DevOps/cloud roles.",
+    "AI/ML": "Your opening line for AI/ML roles.",
+    "QA/Test": "Your opening line for QA/test roles.",
+    "Data": "Your opening line for data roles.",
+    "Customer Support": "Your opening line for support roles.",
+    "Business Ops": "Your opening line for business-ops roles.",
+    "Accounting/Finance": "Your opening line for finance roles.",
+    "Sales/BD": "Your opening line for sales roles.",
+    "Legal/Compliance": "Your opening line for compliance roles."
+  },
+  "lane_angles": {
+    "IT Ops": "Your closing paragraph for IT operations roles.",
+    "DevOps/Cloud": "Your closing paragraph for DevOps/cloud roles.",
+    "AI/ML": "Your closing paragraph for AI/ML roles.",
+    "QA/Test": "Your closing paragraph for QA/test roles.",
+    "Data": "Your closing paragraph for data roles.",
+    "Customer Support": "Your closing paragraph for support roles.",
+    "Business Ops": "Your closing paragraph for business-ops roles.",
+    "Accounting/Finance": "Your closing paragraph for finance roles.",
+    "Sales/BD": "Your closing paragraph for sales roles.",
+    "Legal/Compliance": "Your closing paragraph for compliance roles."
+  }
+}
