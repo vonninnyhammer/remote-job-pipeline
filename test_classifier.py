@@ -88,6 +88,36 @@ check(not unpriced_opened, "unpriced role excluded from sweepable()")
 priced_opened = [p for p in rows if p["title"] == "Systems Administrator"]
 check(len(priced_opened) == 1, "priced role still swept")
 
+print("\nestimates: a model estimate fills the gap but never overwrites real data")
+est = post("Some Role At A Company", "EstCo", None)
+est["id"] = "r7f0f60f"          # Salesloft Financial Analyst, estimated in pay_estimates.json
+src, val = P.pay_source(est)
+check(src == "estimate", "a posting with no range and no kit falls to the estimate", f"src={src}")
+check(val == 80000, "estimate uses the midpoint of the range", f"got {val}")
+check("ESTIMATED" in P.pay_note(est), "pay_note labels it as an estimate, not a posted range")
+
+real = post("Financial Analyst, R&D", "Salesloft", 77500)
+real["id"] = "r7f0f60f"
+check(P.pay_source(real)[0] == "posted", "a posted range still wins over an estimate for the same id")
+
+kit = post("Tier III Service Desk Engineer", "Unio Digital", None)
+kit["id"] = "not-in-map"
+check(P.pay_source(kit)[0] == "ask", "Jordan's own ask still wins over an estimate")
+
+print("\nestimates: a range that spans two tiers is a human decision, not a guess")
+straddle = post("Database Support Engineer (AMER)", "Supabase", None)
+straddle["id"] = "re21b88f"      # estimated $95k-$135k, straddles the $120k line
+check(P.estimate_straddles_tier(straddle), "the $95-135k range is detected as straddling")
+check(P.pursuit(straddle) == "maybe", "a straddling estimate is 'maybe', never pursue or skip",
+      f"got {P.pursuit(straddle)}")
+check("STRADDLES" in P.pay_note(straddle), "pay_note flags the straddle for display")
+
+print("\nestimates: the nearshore case is caught, not US-market priced")
+near = post("Oracle Fusion Cloud Lead", "Tessera Labs", None)
+near["id"] = "rcd2e125"
+check(P.pursuit(near) == "skip", "Mexico/Brazil nearshore consulting skips on a low estimate",
+      f"got {P.pursuit(near)}")
+
 print()
 if FAILS:
     print(f"{len(FAILS)} FAILURE(S): " + "; ".join(FAILS))

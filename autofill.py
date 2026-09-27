@@ -1089,13 +1089,15 @@ def sweep(args):
     # burying that in a wall of per-question output is how the 10% target gets
     # missed by accident.
     print(f"\n{len(prepped)} application(s) ready, best lane and salary first.\n"
-          f"  {'employer':22} {'auto':>9}  {'needs you':>9}  title")
+          f"  {'employer':20} {'auto':>5} {'needs you':>9}  {'pay basis':44} title")
     for r in prepped:
         n = len(r["todo"]) + len(r["ups"])
         h = len(r["humans"])
         pct = 100 - (100 * h // n) if n else 0
-        print(f"    {r['p']['employer'][:22]:22} {pct:>7}%  {str(h) + ' blank':>9}  "
-              f"{r['p']['title'][:40]}")
+        # The pay basis travels with the job so an ESTIMATED range is never
+        # mistaken for something the employer posted.
+        print(f"    {r['p']['employer'][:20]:20} {pct:>4}%  {str(h) + ' blank':>9}  "
+              f"{P.pay_note(r['p'])[:44]:44} {r['p']['title'][:36]}")
     thin = [r for r in prepped
             if len(r["todo"]) + len(r["ups"])
             and len(r["humans"]) * 2 > len(r["todo"]) + len(r["ups"])]

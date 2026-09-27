@@ -510,14 +510,55 @@ def kit_pay(p):
     return best[1] if best else None
 
 def pay_source(p):
-    """("posted"|"ask"|None, value) - what the number is and where it came from."""
+    """("posted"|"ask"|"estimate"|None, value) - what the number is, and where from.
+
+    Order matters: a posted range always wins, then Jordan's own recorded ask,
+    then a model estimate. An estimate is a prior from title/employer/level, not
+    an employer's offer, so it is never allowed to overwrite real data and is
+    labelled 'estimate' everywhere it surfaces.
+    """
     v = p.get("salary_max")
     if v and v > 0:
         return "posted", int(v)
     k = kit_pay(p)
     if k:
         return "ask", k["ask"]
+    e = pay_estimate(p)
+    if e:
+        return "estimate", (e["low"] + e["high"]) // 2
     return None, 0
+
+_ESTIMATES = None
+def pay_estimates(root=None):
+    """id -> {low, high, confidence, basis} from pay_estimates.json."""
+    global _ESTIMATES
+    if _ESTIMATES is None:
+        root = root or os.path.dirname(os.path.abspath(__file__))
+        try:
+            with open(os.path.join(root, "pay_estimates.json")) as fh:
+                data = json.load(fh)
+            _ESTIMATES = data.get("estimates", data) if isinstance(data, dict) else {}
+        except Exception:
+            _ESTIMATES = {}
+    return _ESTIMATES
+
+def pay_estimate(p):
+    return pay_estimates().get(p.get("id"))
+
+def estimate_straddles_tier(p):
+    """True when the estimate's own range spans two of Jordan's pay tiers.
+
+    A range like $110-145k is tier 1 at the bottom and tier 2 at the top, so
+    the midpoint decides the outcome and the midpoint is a guess. Rather than
+    let a shaky estimate silently decide whether Jordan applies to a job, the
+    caller downgrades these to 'maybe' and surfaces them for a human.
+    """
+    e = pay_estimate(p)
+    if not e:
+        return False
+    def tier(v):
+        return 3 if v >= 200_000 else 2 if v >= 120_000 else 1
+    return tier(e["low"]) != tier(e["high"])
 
 def pay_tier(p):
     _src, v = pay_source(p)
@@ -542,12 +583,30 @@ def pursuit(p):
     """pursue / maybe / skip / unpriced - see the table above."""
     a, pay = automate_score(p.get("title", "")), pay_tier(p)
     if pay == 0:
-        return "unpriced"          # no data: Jordan's call, never auto-applied
+        return "unpriced"          # no data at all: Jordan's call, never auto-applied
+    if estimate_straddles_tier(p):
+        return "maybe"             # the estimate spans two tiers - a human decides
     if pay == 3:
         return "pursue"            # >=200k applies regardless of automability
     if pay == 2:
         return "pursue" if a >= 2 else "maybe"
     return "pursue" if a >= 3 else "skip"   # under 120k needs to be highly automatable
+
+def pay_note(p):
+    """One line of provenance for display next to a job."""
+    src, v = pay_source(p)
+    if src is None:
+        return "no pay data"
+    if src == "posted":
+        return f"${v:,} posted"
+    if src == "ask":
+        return f"${v:,} your ask"
+    e = pay_estimate(p)
+    if not e:
+        return f"${v:,}"
+    flag = "  STRADDLES A TIER - verify" if estimate_straddles_tier(p) else ""
+    return (f"${e['low']:,}-${e['high']:,} ESTIMATED (mid ${v:,}, "
+            f"{e['confidence']} confidence){flag}")
 
 def stability_hint(p):
     if not STABLE_EMPLOYER_RE.search(p.get("employer", "")):
@@ -1862,9 +1921,10 @@ def cmd_export(data, owner):
              value=("target = strong title match (sysadmin/IT Ops/endpoint/MDM/SaaS/BizTech); "
                     "watch = plausible, eyeball it. Hard vetoes (MSP/NOC/call-center/staffing) are excluded. "
                     "Stability hint is a sector heuristic - verify the employer yourself.")).alignment = Alignment(wrap_text=True)
-    ws3.merge_cells("A2:J2")
+    ws3.merge_cells("A2:L2")
     ws3.row_dimensions[2].height = 30
-    h3 = ["Fit", "ID", "Employer", "Title", "Salary", "Location", "Board", "First Seen", "Stability hint", "URL"]
+    h3 = ["Fit", "Pursuance", "ID", "Employer", "Title", "Salary", "Pay basis",
+          "Location", "Board", "First Seen", "Stability hint", "URL"]
     for i, h in enumerate(h3, 1):
         c = ws3.cell(row=4, column=i, value=h)
         c.font = hf
@@ -1879,7 +1939,8 @@ def cmd_export(data, owner):
                                  not bool(x[1].get("salary_verified")),
                                  -(x[1].get("salary_max") or 0)))
     for r, (b, p) in enumerate(fit_rows, start=5):
-        row = [b, p["id"], p["employer"], p["title"], p.get("salary") or "not posted",
+        row = [b, pursuit(p), p["id"], p["employer"], p["title"],
+               p.get("salary") or "not posted", pay_note(p),
                p["location"], p.get("board", ""), p.get("first_seen", "")[:10],
                stability_hint(p), p["url"]]
         for c, v in enumerate(row, 1):
