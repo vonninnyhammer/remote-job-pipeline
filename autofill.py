@@ -1000,6 +1000,12 @@ def sweepable(data, owner, limit=0, include_stretch=False, any_host=False):
         bucket = P.fit_bucket(p)
         if bucket not in order:
             continue
+        # Pursuance gate. Jordan: a role with no pay data is his call to make,
+        # never something to auto-apply to - so "unpriced" never gets a tab.
+        # See pipeline.pursuit() for the automability-vs-pay table.
+        pu = P.pursuit(p)
+        if pu == "unpriced":
+            continue
         if P.get(p, st)[0] not in ("new", "staged", "open", "rejected"):
             continue
         if is_listing_page(p):
@@ -1008,9 +1014,11 @@ def sweepable(data, owner, limit=0, include_stretch=False, any_host=False):
             continue
         if not any_host and P.ats_board_jid(P.req_url(p))[0] not in KNOWN_ATS:
             continue
-        out.append((order[bucket], -int(p.get("salary_max") or 0), p))
-    out.sort(key=lambda t: (t[0], t[1]))
-    rows = [t[2] for t in out]
+        pu_order = {"pursue": 0, "maybe": 1}.get(pu, 2)
+        pay = P.pay_source(p)[1]
+        out.append((order[bucket], pu_order, -int(pay or 0), p))
+    out.sort(key=lambda t: t[:3])
+    rows = [t[3] for t in out]
     return rows[:limit] if limit else rows
 
 

@@ -414,6 +414,141 @@ def fit_bucket(p):
         return "stretch"
     return "other"
 
+# ---------------------------------------------------------------------------
+# Pursuance: is a role worth Jordan's time at all?
+#
+# Jordan, 2026-09-27: "whether they are in my lane depends on to what extent
+# I am able to automate the job duties countered with how high the pay is."
+# Lane membership is therefore necessary but not sufficient, and pay was used
+# only as a sort key before - which meant a $385k security role and a $60k
+# support role scored identically. The trade-off is an explicit table rather
+# than a formula so a human can read it and overrule it.
+#
+# automate: 3 = mostly hand-off-able to agents, 2 = about half,
+#           1 = mostly human judgement/accountability, 0 = none.
+# Checked in order, so the most automatable match wins.
+AUTOMATE_3_RE = re.compile(r"""
+    \bsysadmin|\bsystems?\s+(?:admin|administrator)|\bit\s+(?:admin|administrator|technician|specialist|coordinator)\b|
+    \bendpoint|\beuc\b|\bmdm\b|\bintune|\bgoogle\s?workspace|\bm365\b|\bmicrosoft\s?365\b|
+    \bnetwork\s+(?:admin|administrator|engineer)\b|\bhelp\s?desk|\bservice\s+desk|
+    \bit\s+support|\bdesktop\s+support|\btechnical\s+support|\bcomputer\s+technician|
+    \bsupport\s+engineer|\btechnical\s+account\s+manager|
+    \bsystems?\s+engineer|\binfrastructure\s+(?:engineer|specialist)\b|
+    \bcloud\s+support\s+engineer|\bdatabase\s+support\s+engineer|
+    \bidentity\s+(?:and|&)\s+access|\biam\s+admin|\bworkday\b|\berp\b|
+    \bbusiness\s+systems?\s+admin|\bsalesforce\b
+""", re.I | re.X)
+AUTOMATE_2_RE = re.compile(r"""
+    \bfp\s*&\s*a\b|\bfinancial\s+(?:analyst|planning)|\bquality\s+engineer\b|
+    \b(?:ai|technical)\s+success|\bdata\s+engineer|
+    \btechnical\s+account\s+manager|\bimplementations?\s+(?:engineer|consultant)\b
+""", re.I | re.X)
+AUTOMATE_1_RE = re.compile(r"""
+    \bsecurity\s+(?:engineer|analyst|architect)|\bqa\b|\btester\b|\bquality\b|\bqms\b|
+    \bsolutions?\s+(?:specialist|consultant)|\brevenue\b|\bsuccess\b|
+    \baccount\s+executive|\bgis\b|\btechnical\s+recruiter\b
+""", re.I | re.X)
+
+# Pay tiers, from Jordan's ruling: three tiers, $200k / $120k.
+# 3 = >=200k, 2 = 120k-200k, 1 = <120k, 0 = no pay data anywhere.
+#
+# Pay is backfilled from kits/.kitmap.json when a posting has no range of its
+# own. That file records the ASK Jordan set when he built each kit, which is
+# NOT the same number as what the employer posted, so provenance is kept and
+# surfaced rather than silently merged - "posted" and "ask" are different
+# claims and the table below only ever sorts on real posted ranges when one
+# exists. Without this backfill 37 of 45 shortlist roles looked "unpriced",
+# including roles he had already engaged with and written a kit for.
+def _norm(s):
+    return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
+
+def load_kit_pay(root=None):
+    """(employer, title) -> {"ask": int, "basis": str}, from kits/.kitmap.json."""
+    root = root or os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(root, "kits", ".kitmap.json")
+    out = {}
+    try:
+        with open(path) as fh:
+            data = json.load(fh)
+    except Exception:
+        return out
+    for rec in (data.values() if isinstance(data, dict) else data):
+        try:
+            emp, title = _norm(rec.get("employer")), _norm(rec.get("title"))
+            ask = rec.get("ask")
+            if emp and title and ask:
+                out[(emp, title)] = {"ask": int(ask), "basis": rec.get("ask_basis", "")}
+        except Exception:
+            continue
+    return out
+
+_KIT_PAY = None
+def kit_pay(p):
+    """Jordan's own ask for this role, if he already built a kit for it."""
+    global _KIT_PAY
+    if _KIT_PAY is None:
+        _KIT_PAY = load_kit_pay()
+    emp, title = _norm(p.get("employer")), _norm(p.get("title"))
+    if not emp or not title:
+        return None
+    hit = _KIT_PAY.get((emp, title))
+    if hit:
+        return hit
+    # Kit titles drift from posting titles ("Senior Data Analyst, GTM Analytics"
+    # vs "Senior Financial Analyst, GTM"), so fall back to a token-overlap
+    # match within the same employer rather than losing the pay entirely.
+    best = None
+    for (e, t), v in _KIT_PAY.items():
+        if e != emp:
+            continue
+        a, b = set(t.split()), set(title.split())
+        if not a or not b:
+            continue
+        jac = len(a & b) / len(a | b)
+        if jac >= 0.5 and (best is None or jac > best[0]):
+            best = (jac, v)
+    return best[1] if best else None
+
+def pay_source(p):
+    """("posted"|"ask"|None, value) - what the number is and where it came from."""
+    v = p.get("salary_max")
+    if v and v > 0:
+        return "posted", int(v)
+    k = kit_pay(p)
+    if k:
+        return "ask", k["ask"]
+    return None, 0
+
+def pay_tier(p):
+    _src, v = pay_source(p)
+    if not v or v <= 0:
+        return 0
+    if v >= 200_000:
+        return 3
+    if v >= 120_000:
+        return 2
+    return 1
+
+def automate_score(title):
+    t = title or ""
+    if GIG_RE.search(t):
+        return 3          # gig/annotated QA is the most hand-off-able work there is
+    for score, rx in ((3, AUTOMATE_3_RE), (2, AUTOMATE_2_RE), (1, AUTOMATE_1_RE)):
+        if rx.search(t):
+            return score
+    return 1              # unlisted shapes default to human judgement, not to agent-doable
+
+def pursuit(p):
+    """pursue / maybe / skip / unpriced - see the table above."""
+    a, pay = automate_score(p.get("title", "")), pay_tier(p)
+    if pay == 0:
+        return "unpriced"          # no data: Jordan's call, never auto-applied
+    if pay == 3:
+        return "pursue"            # >=200k applies regardless of automability
+    if pay == 2:
+        return "pursue" if a >= 2 else "maybe"
+    return "pursue" if a >= 3 else "skip"   # under 120k needs to be highly automatable
+
 def stability_hint(p):
     if not STABLE_EMPLOYER_RE.search(p.get("employer", "")):
         return ""
