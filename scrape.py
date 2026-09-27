@@ -24,7 +24,7 @@ Usage:
   python3 scrape.py sync             # fetch, filter, dedupe, merge into postings.json
   python3 scrape.py stats            # show counts per board
 """
-import json, os, re, sys, hashlib, datetime, time
+import json, os, re, sys, hashlib, datetime, time, html
 import requests
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -182,32 +182,54 @@ def parse_salary(text):
 # --------------------------------------------------------------------------
 LANES = [
     ("AI/ML", r"\bai\b|\bai/|machine learning|\bml\b|llm|nlp|prompt|computer vision|\bocr\b|"
-              r"data scienti|mlops|\bmodels?\b|deep learning|genai"),
+              r"data scienti|mlops|\bmodels?\b|deep learning|genai|ai[-/ ]agent|ai[-/ ]native|"
+              r"\bcto\b|chief technology"),
     ("Data", r"data (analyst|entry|engineer|ingest|processor|annotator)|sql\b|"
-             r"database|etl|bi ?developer|analytics|power bi|tableau|reporting"),
-    ("QA/Test", r"\bqa\b|test(ing|er)?|quality (assurance|engineer)|sdet|uat"),
+             r"database|etl|bi ?developer|analytics|power bi|tableau|reporting|"
+             r"(product|technical|revenue systems) analyst"),
+    ("QA/Test", r"\bqa\b|test(ing|er)?|quality (assurance|engineer|analyst|management)|"
+                r"\bqms\b|sdet|uat"),
     ("DevOps/Cloud", r"devops|sre|site reliability|platform engineer|cloud|kubernetes|"
-                     r"docker|terraform|infrastructure( engineering)|build engineer|ci/cd"),
-    ("IT Ops", r"\bit\b support|help ?desk|desktop|sysadmin|system admin|technician|noc|"
-               r"network admin|network engineer|system engineer|it admin|msp|"
+                     r"docker|terraform|infrastructure( engineering)?|build engineer|ci/cd"),
+    ("IT Ops", r"\bit\b support|help ?desk|service ?desk|desktop|sysadmin|system admin|technician|noc|"
+               r"network admin|network engineer|it admin|msp|workday|systems? engineer|"
                r"(?<!data )support engineer|tier [12]|endpoint|intune|sccm|field ?engineer"),
     ("Customer Support", r"customer (support|success|service)|support specialist|"
                          r"(?!data )support (agent|rep)|client success|cs specialist|concierge"),
     ("Business Ops", r"operations (specialist|coordinator|manager|associate)|project (manager|coordinator)|"
                      r"program manager|business (operations|analyst)|consultant|strategy|"
-                     r"product (manager|owner|ops)"),
+                     r"product (manager|owner|ops)|technical consultant"),
     ("Accounting/Finance", r"bookkeep|accountant|payroll|finance|controller|tax |"
-                           r"financial (analyst|advisor)|\bfo\b"),
-    ("Sales/BD", r"sales|account (executive|manager)|business development|bdr|sdr|partner manager"),
-    ("Design", r"designer|ux|ui|graphic|visual design|illustrat"),
-    ("Marketing", r"marketing|seo|sem|social media|brand|growth (marketing|hacker)|content strategist"),
+                           r"financial (analyst|advisor)|\bfo\b|underwrit|actuar"),
+    ("Sales/BD", r"sales|account (executive|manager)|business development|bdr|sdr|"
+                r"partner manager"),
+    ("Design", r"designer|design (engineer|lead)|\bux\b|\bui\b|graphic|visual design|illustrat"),
+    ("Marketing", r"marketing|marketer|\bseo\b|\bsem\b|social (media|comms)|brand|"
+                  r"growth (marketing|hacker)|content strategist|performance market"),
     ("Content/Creative", r"writer|editor|content (creator|writer)|copywriter|video|podcast|journal"),
     ("Admin Ops", r"virtual assistant|administrative|executive assistant|office (manager|admin)|"
                   r"reception"),
     ("HR", r"\bhr\b|recruit|talent|people (ops|partner)|coordinator people"),
-    ("Legal/Compliance", r"paralegal|legal |compliance|risk"),
+    ("Legal/Compliance", r"paralegal|counsel|attorney|legal |compliance|risk|trust,? safety"),
 ]
 LANE_RE = [(name, re.compile(pat, re.I)) for name, pat in LANES]
+
+# Description-fallback eligibility. The second pass may only assign a lane whose
+# signal is a ROLE NOUN, never a bare technology. Without this gate, a role whose
+# title carries no lane signal ("Senior Performance Marketer" at an AI company)
+# fell through to the description and inherited whatever the employer's
+# boilerplate bragged about, so every opening at an AI shop got filed under AI/ML
+# regardless of what the person would actually be doing. Deriving this by
+# subtracting the buzzwords out of the alternation is a trap: it leaves empty
+# branches, and an empty branch matches every string.
+DESC_UNSAFE = {"AI/ML", "Data", "QA/Test", "DevOps/Cloud"}
+LANE_DESC_RE = [(n, rx) for n, rx in LANE_RE if n not in DESC_UNSAFE]
+
+# Talent marketplaces, not employers. They post invented "Senior Independent X
+# Engineer" listings with real-looking bands that pollute the top of any
+# salary-sorted pool.
+MARKETPLACES = {"A.Team", "A.Team (Marketplace)", "Toptal", "Crossover", "Gun.io"}
+
 # lanes plausibly worth >= $60k even without a posted salary
 SALARY_UNVERIFIED_OK = {
     "AI/ML", "Data", "QA/Test", "DevOps/Cloud", "IT Ops",
@@ -216,15 +238,15 @@ SALARY_UNVERIFIED_OK = {
 }
 
 def classify_lane(title, text=""):
-    """Classify on the TITLE first so 'AI' mentioned in a blurby description
-    does not hijack every role; only fall back to description text when the
-    title alone has no lane signal."""
+    """Classify on the TITLE first. Only fall back to the description when the
+    title alone has no lane signal, and on that second pass use role nouns
+    only - never the generic tech buzzwords - so a company that mentions AI in
+    its boilerplate cannot claim every opening it advertises."""
     for name, rx in LANE_RE:
         if rx.search(title):
             return name
-    hay = f"{title} {text}"
-    for name, rx in LANE_RE:
-        if rx.search(hay):
+    for name, rx in LANE_DESC_RE:
+        if rx.search(f"{title} {text}"):
             return name
     return "Other"
 
@@ -274,10 +296,81 @@ def posting_id(url):
 _TEXTCLEAN = re.compile(r"<[^>]+>")
 
 def clean_html(x):
-    return re.sub(r"\s+", " ", _TEXTCLEAN.sub(" ", x or "")).strip()
+    x = html.unescape(x or "")
+    return re.sub(r"\s+", " ", _TEXTCLEAN.sub(" ", x)).strip()
 
 def now():
     return datetime.datetime.now().isoformat(timespec="minutes")
+
+MAILTO_RE = re.compile(r"mailto:\s*([a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,})", re.I)
+EMAIL_RE = re.compile(r"[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}", re.I)
+APPLY_HINT_RE = re.compile(r"apply|send (?:your |a )?(?:resume|cv|application)|"
+                           r"e-?mail (?:your |a )?(?:resume|cv|application)|"
+                           r"submit (?:your )?(?:resume|cv|application)|"
+                           r"(?:submit|send|apply).{0,40}(?:resume|cv|application)", re.I)
+# addresses that are clearly NOT an application destination
+NOISE_EMAIL = re.compile(
+    r"^(no[-_]?reply|donotreply|do[-_]?not[-_]?reply|notifications?|alerts?|"
+    r"mailer[-_]?daemon|postmaster|webmaster|sitemap|unsubscribe|newsletter|"
+    r"marketing@?|sales@?|billing@?|payments@?|abuse@?|security@?|privacy@?|"
+    r"legal@?|root@?|admin@?" + r")", re.I)
+# EEO / ADA / accessibility-request and recruiting-fraud-reporting mailboxes.
+# These sit in a "contact us" clause next to the word "apply", so the
+# proximity heuristic used to pick them up and mail real applications to a
+# restricted box nobody in recruiting ever reads.
+NOISE_EMAIL_LOCALPART = re.compile(
+    r"accommodation|reasonable[-_]?accommodation|accessib|"
+    r"ada[-_]?request|eeo|equal[-_]?opportunity|"
+    r"fraud|scam|phish|report[-_]?phish|"
+    r"interview[-_]?accommodat", re.I)
+NOISE_DOMAIN = re.compile(r"^(?:example|sample|test|localhost|invalid)\.|<\.local>|"
+                          r"\.(?:png|jpg|gif)$", re.I)
+# Some employers state outright that email/unsolicited applications are not
+# accepted and that the ATS is the only reviewed channel. No address in such
+# a description is an apply channel, so suppress the whole posting.
+NO_EMAIL_APPLY_RE = re.compile(
+    r"does not accept unsolicited (?:resumes|applications)|"
+    r"will not (?:be )?(?:review|consider)[^.]{0,60}(?:outside|directly|outside of)[^.]{0,40}applicant tracking|"
+    r"applications? submitted (?:outside|directly|via (?:email|LinkedIn))[^.]{0,80}(?:not (?:be )?review|not considered)|"
+    r"must apply (?:through|via|on) (?:our|the)[^.]{0,40}(?:careers|site|portal|ats|application)", re.I)
+
+def _clean_email_candidate(raw):
+    e = (raw or "").strip().lower().rstrip(").,;") if raw else ""
+    if not e:
+        return ""
+    if NOISE_EMAIL.search(e) or NOISE_EMAIL_LOCALPART.search(e) \
+            or NOISE_DOMAIN.search(e.split("@")[-1]):
+        return ""
+    return e
+
+def extract_apply_email(description):
+    """Best-effort apply-address for a posting description. Accepts ANY real
+    email found (mailto: links first, then the one nearest to apply-wording,
+    else any email at all) - wide net on purpose - while dropping obvious
+    noise (noreply/notification/marketing-style localparts, placeholder
+    domains). Review `autosend.py scan` before trusting a batch."""
+    t = clean_html(description or "")
+    if not t:
+        return ""
+    if NO_EMAIL_APPLY_RE.search(t):
+        return ""
+    m = MAILTO_RE.search(t)
+    if m:
+        e = _clean_email_candidate(m.group(1))
+        if e:
+            return e
+    hits = []
+    hint_positions = [h.start() for h in APPLY_HINT_RE.finditer(t)]
+    for m in EMAIL_RE.finditer(t):
+        e = _clean_email_candidate(m.group(0))
+        if e:
+            hits.append((m.start(), e))
+    if not hits:
+        return ""
+    if hint_positions:
+        best = min(hits, key=lambda h: min(abs(h[0] - p) for p in hint_positions))
+        return best[1]
+    return hits[0][1]
 
 # --------------------------------------------------------------------------
 # board fetchers - each returns list of raw dicts with common keys
@@ -503,6 +596,9 @@ def sync():
             if not remote_and_us(loc, board):
                 rejected["not_remote_us"] += 1
                 continue
+            if (r.get("company") or r.get("employer") or "").strip() in MARKETPLACES:
+                rejected["marketplace"] = rejected.get("marketplace", 0) + 1
+                continue
             lane = classify_lane(r["title"], r.get("tags", "") + " " + (r.get("description") or ""))
             lo, hi, verified = parse_salary(r.get("salary_raw"))
             if not verified:
@@ -540,6 +636,8 @@ def sync():
                 "salary_min": lo,
                 "salary_max": hi,
                 "posted": r.get("published_raw") or "",
+                "description": (r.get("description") or "")[:2000],
+                "apply_email": extract_apply_email(r.get("description")),
                 "lane": lane,
                 "hot_skills": hot_skills_for(lane, r.get("tags", "")),
                 "angle": gen_angle(lane, board),
@@ -645,6 +743,51 @@ def stats():
     for b, n in by_lane.most_common():
         print(f"  {b:<20} {n}")
 
+def backfill():
+    """Re-fetch raw postings and patch description/apply_email onto existing
+    master entries that lost them (they were fetched but never stored)."""
+    session = requests.Session()
+    session.headers["User-Agent"] = UA
+    master = load_postings()
+    by_id = {p["id"]: p for p in master["postings"]}
+    patched = 0
+    for board, fn in SOURCES:
+        try:
+            raw = fn(session)
+        except Exception as e:
+            print(f"[{board}] FAILED: {e}")
+            continue
+        for r in raw:
+            if not r.get("url"):
+                continue
+            jid = posting_id(r["url"])
+            p = by_id.get(jid)
+            if p is None:
+                continue
+            desc = clean_html(r.get("description") or "")
+            full = desc
+            desc = desc[:2000]
+            changed = False
+            old = p.get("description") or ""
+            dirty = ("&" in old and ("&lt;" in old or "&amp;" in old or "&#" in old))
+            if ((not old.strip()) or dirty) and desc.strip():
+                p["description"] = desc
+                changed = True
+            # extract from the FULL text: the apply/contact clause usually sits
+            # past the 2000 chars we keep on the record
+            ae = extract_apply_email(full)
+            if ae != (p.get("apply_email") or "").strip():
+                # empty result now clears a stale address: the extractor got
+                # smarter about noise and no-unsolicited-email postings
+                p["apply_email"] = ae
+                changed = True
+            if changed:
+                patched += 1
+        print(f"  [{board}] patched {patched - 0} so far")
+    save_postings(master)
+    emailed = sum(1 for p in master["postings"] if p.get("apply_email"))
+    print(f"\nbackfill done: {patched} postings enriched; {emailed} total with apply_email")
+
 def main():
     args = sys.argv[1:]
     cmd = args[0] if args else "help"
@@ -654,6 +797,8 @@ def main():
         sync()
     elif cmd == "stats":
         stats()
+    elif cmd == "backfill":
+        backfill()
     else:
         print(__doc__)
 

@@ -111,7 +111,7 @@ pipeline.py      CLI: heat/status/stage/generate/review/approve/open/submitted/n
 run.sh           cron entry point (sync + heat log)
 postings.json    (gitignored) master store
 state.json       (gitignored) per-job status
-kits/<id>/       (gitignored) generated application kits
+kits/<Employer> - <Title> - $ask/   (gitignored) generated application kits
 ```
 
 ## Notes

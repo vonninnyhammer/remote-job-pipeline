@@ -6,9 +6,22 @@ seen.json
 fresh.json
 state.json
 board_status.json
+# Jordan's own screening answers: 15 work-history entries plus a deliberate
+# EEO accommodation answer. This is personal data about a real disability, and
+# the remote is a PUBLIC GitHub repo - it must never be published.
+screening.json
+# runtime caches/state, regenerable, not source
+watcher_state.json
+ats_cache.json
+
+# secrets (never publish)
+.env
+.env.*
 
 # generated artifacts
 kits/
+*.png
+sweep.png
 logs/
 __pycache__/
 *.pyc
