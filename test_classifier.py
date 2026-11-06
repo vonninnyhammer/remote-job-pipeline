@@ -118,6 +118,59 @@ near["id"] = "rcd2e125"
 check(P.pursuit(near) == "skip", "Mexico/Brazil nearshore consulting skips on a low estimate",
       f"got {P.pursuit(near)}")
 
+# The 2026-10-07 gate audit. NON_FUNCTION_RE had grown a blanket seniority
+# clause and a `data analyst` clause, and between them they demoted 8 of
+# Jordan's own 26 kit titles to "other" - three of them submitted AFTER the
+# gate landed. These lock the direction so it cannot silently swing back.
+print("\ngate audit: Jordan's own kit titles are never discarded by NON_FUNCTION")
+
+KIT_TITLES_TARGET = [
+    ("Data Analyst, Credit Risk", "Chime Financial, Inc"),
+    ("Data Analyst, Clinical Data Effectiveness", "Clover Health"),
+    ("Technical Product Analyst", "CentralReach"),
+    ("Manager, Support Engineering, US Government", "GitLab"),
+    ("Critical Situation Manager", "Abnormal"),
+    ("Engineering Manager, Core DevOps", "GitLab"),
+    ("Senior Data Analyst, GTM Analytics - US", "Luxury Presence"),
+]
+for title, employer in KIT_TITLES_TARGET:
+    b = P.fit_bucket({"title": title, "employer": employer})
+    check(b in ("target", "watch"),
+          f"kit title is not 'other': {employer} — {title}", f"got {b}")
+
+print("\ngate audit: seniority alone never blocks, but a wrong function still does")
+check(P.fit_bucket({"title": "Engineering Manager, Dedicated Infrastructure",
+                    "employer": "GitLab"}) == "target",
+      "manager + infrastructure in a real lane is a target")
+check(P.fit_bucket({"title": "Director of Product Marketing - Cloud & OT Security",
+                    "employer": "Tenable"}) == "other",
+      "marketing function still blocked even with a real lane")
+check(P.fit_bucket({"title": "Associate Manager, Consumer Integrated Marketing",
+                    "employer": "DoorDash"}) == "other",
+      "marketing function still blocked in the QA/Test lane")
+check(P.fit_bucket({"title": "SEO & Analytics Strategist", "employer": "Fueled"}) == "other",
+      "analytics as the FUNCTION still blocks")
+check(P.fit_bucket({"title": "Senior Manager, Data Strategy & Analytics",
+                    "employer": "Happy Money"}) == "other",
+      "analytics as the FUNCTION still blocks under a manager title")
+
+print("\nsecurity: a lane exists, and it lands where he has kits")
+check("Security" in P.REAL_LANES, "Security is a REAL_LANE")
+check(P.title_lane("Senior Application Security Engineer") == "Security",
+      "application security titles route to the Security lane")
+check(P.title_lane("EDR Engineer / Senior EDR Engineer") == "Security",
+      "EDR titles route to the Security lane")
+check(P.fit_bucket({"title": "Security Engineer", "employer": "GitLab"}) == "target",
+      "GitLab Security Engineer is a target")
+check(P.fit_bucket({"title": "Senior Security Analyst", "employer": "Abby Care"}) == "target",
+      "Senior Security Analyst is a target - the lane exists to catch it")
+check(P.fit_bucket({"title": "Security Sales Engineer - SLED/Public Sector",
+                    "employer": "Tenable"}) != "target",
+      "Security lane does not steal a Sales/BD title (first-match-wins)")
+check(P.fit_bucket({"title": "Director of Product Marketing - Cloud & OT Security",
+                    "employer": "Tenable"}) != "target",
+      "Security lane does not steal a DevOps/Cloud title")
+
 print()
 if FAILS:
     print(f"{len(FAILS)} FAILURE(S): " + "; ".join(FAILS))

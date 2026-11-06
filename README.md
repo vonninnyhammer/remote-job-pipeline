@@ -29,6 +29,7 @@ keeps every account and thread legit.
 | Working Nomads | official API |
 | Greenhouse companies | official board API (with `?questions=true`) |
 | Lever companies | official board API (with schema) |
+| Ashby companies | official job-board API |
 | SmartRecruiters | official board API |
 
 Greenhouse boards are special: the API exposes the **actual questions on the
@@ -108,10 +109,40 @@ Leave both absent and the tool still runs with neutral defaults.
 ```
 scrape.py        board sync (8 boards) → postings.json
 pipeline.py      CLI: heat/status/stage/generate/review/approve/open/submitted/note/export
+triage.py        reply classification + one-shot morning alerts + follow-ups
+notify.py        IMAP response watcher → triage ledger, phone push (cron, 15 min)
 run.sh           cron entry point (sync + heat log)
 postings.json    (gitignored) master store
 state.json       (gitignored) per-job status
+responses.json   (gitignored) inbound reply ledger — alerted once, then acked
 kits/<Employer> - <Title> - $ask/   (gitignored) generated application kits
+```
+
+## Reply triage
+
+Replies are classified once, on arrival, into four buckets:
+
+| Category | Meaning | Alerts? |
+|---|---|---|
+| `action` | a person wrote and wants something | yes, with the ask + deadline |
+| `rejection` | the door closed | yes, no ask |
+| `human` | a person wrote, nothing wanted | no |
+| `auto` | OOO, ticket, system ack | no |
+
+Only `action` and `rejection` reach the phone and the morning digest. Every
+reply — noise included — is still filed in `responses.json`, so a silent
+application can be told apart from one a person actually answered.
+
+Alerts are **one-shot**: printed once, then acked. Ask for them again with
+`--all`, or inspect without consuming with `--no-ack`.
+
+```bash
+python3 triage.py digest              # what needs you, then ack it
+python3 triage.py digest --all        # replay everything
+python3 triage.py pending             # same list, no writes
+python3 triage.py followup            # applications silent 7+ days
+python3 triage.py followup --draft ID # a ready-to-send follow-up
+good-morning --all                    # same, from the morning routine
 ```
 
 ## Notes

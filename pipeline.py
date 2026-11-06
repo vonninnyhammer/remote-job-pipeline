@@ -33,7 +33,7 @@ cover-letter lanes) - both optional; see owner.example.json.
 State lives in state.json; kits are written under kits/<Employer> - <Title> - $ask/.
 Every command takes an id, a kit name, or any unique part of one.
 """
-import json, os, re, sys, subprocess, datetime, shutil
+import json, os, re, sys, subprocess, datetime, shutil, tempfile
 import requests
 
 try:
@@ -320,7 +320,12 @@ STABLE_EMPLOYER_RE = re.compile(r"""
 # Lanes that match Jordan's actual 15-year track record. He holds kits in every
 # one of these (GitLab Support, Unio Digital Tier III desk, Ace IT QA tester,
 # Chime/Clover data analyst, CentralReach quality, Canonical Linux systems).
-REAL_LANES = {"IT Ops", "Customer Support", "QA/Test", "Data", "Admin Ops", "DevOps/Cloud"}
+# Security joined 2026-10-07: he holds OpenAI "Security Engineer, Infrastructure
+# Security" at $385k and Vercel "Security Engineer, Cloud" at $110k, and
+# test_classifier.py already locks the OpenAI one as a pursue - it was never a
+# question of whether security was his lane, only that no lane existed to say so.
+REAL_LANES = {"IT Ops", "Customer Support", "QA/Test", "Data", "Admin Ops",
+              "DevOps/Cloud", "Security"}
 # Dev/ML is a documented STRETCH and must never bucket as "target". The HIRE-EASE
 # note lower in this file says it outright: self-taught dev/ML is "real but NOT a
 # professional full-stack / ML engineer's resume", with "no formal degree, no
@@ -356,23 +361,70 @@ CSM_RE = re.compile(r"customer\s+success|sales\s+(?:account|development)|\baccou
 # engineer", "cloud support engineer" - he has kits for Senior Data Engineer
 # (Socure), Database Support Engineer (Supabase) and Cloud Support Engineer
 # (Canonical), and those three arrived through this fallback.
+# Job function, not seniority. Narrowed 2026-10-07 after an audit fed Jordan's
+# own 26 kit titles back through fit_bucket and 8 came out "other".
+#
+# Two things came out and one went in:
+#
+#  * `data analyst` / `product analyst` are gone from the alternation. He holds
+#    kits for Data Analyst (Chime Credit Risk, Clover Clinical, Luxury Presence
+#    GTM) and Technical Product Analyst (CentralReach), and submitted all four
+#    AFTER this gate was written on 2026-09-27. Blocking them meant the
+#    classifier discarded roles he had already applied to.
+#  * the two blanket seniority clauses are gone - `(sr|senior)? (manager|
+#    director)` and `(manager|director|vp|head of|chief)`. Seniority is not a
+#    job function. They caught "Manager, Support Engineering" and "Engineering
+#    Manager, Core DevOps", both of which he has kits for.
+#  * `marketing` / `sales` / `demand generation` went IN, because they are real
+#    functions that were only ever being caught by the seniority block - e.g.
+#    Tenable "Director of Product Marketing" and DoorDash "Associate Manager,
+#    Consumer Integrated Marketing" both sit in a REAL_LANE and would otherwise
+#    have been promoted the moment seniority stopped blocking them.
+#
+# Still blocked, and deliberately: product manager, solutions architect,
+# compliance, finance/GTM analysts, account exec, and product-engineering
+# shapes (those also fail DEV_GENERIC_RE, which runs first).
 NON_FUNCTION_RE = re.compile(r"""
-    \b(?:data|business|product|revenue|gtm|marketing|compensation|internal|
-       people|finance|financial|security|network|cloud|web)\s+analyst\b
-  | \banalytics\b | \bbusiness\s+intelligence\b
+    \b(?:business|revenue|gtm|marketing|compensation|internal|
+       people|finance|financial|network|cloud|web)\s+analyst\b
+  | \bbusiness\s+intelligence\b
   | \bproduct\s+manager\b
   | \b(?:solutions?|pre-?sales|enterprise)\s+architect\b
   | \b(?:client|customer)\s+success\b
   | \baccount\s+(?:executive|manager)\b
-  | \b(?:sr\.?|snr\.?|senior)\s+(?:manager|director)\b
-  | \b(?:manager|director|vp|vice\s+president|head\s+of|chief)\b
+  | \b(?:marketing|sales|demand\s+generation)\b
   | \b(?:golang|rust|java|python|kotlin)\s+(?:software\s+)?engineer\b
   | \bkubernetes\s+engineer\b | \bplatform\s+engineer\b
-  | \bcore\s+devops\b | \bci/cd\b
+  | \bci/cd\b
   | \bsoftware\s+(?:development\s+)?(?:engineer|developer)\b
   | \b(?:services?|cloud)\s+architect\b
   | \bcompliance\b
 """, re.I | re.X)
+# `security analyst` came out of that alternation the day Security became a
+# REAL_LANE. The clause existed to stop a security title being promoted by the
+# Data lane on the strength of the word "analyst" alone; now that Security is
+# its own lane, blocking "Senior Security Analyst" would demote the one shape
+# the lane exists to catch. Only Abby Care was affected, and it is a target.
+# `\banalytics\b` used to sit in NON_FUNCTION_RE, where it killed two roles
+# Jordan has kits for - "Senior Data Analyst, GTM Analytics - US" and
+# "Data Analyst, Platform Excellence Ops Analytics" - because the word follows
+# the job function instead of naming one. It still has to block the shapes
+# where analytics IS the function: Fueled "SEO & Analytics Strategist" and
+# Happy Money "Senior Manager, Data Strategy & Analytics" are both in the Data
+# lane and neither is his. So it is checked separately and yields whenever the
+# title already names an analyst role he holds kits for.
+ANALYTICS_RE = re.compile(r"\banalytics\b", re.I)
+ANALYST_ROLE_RE = re.compile(r"\b(?:data|business|product|technical product|"
+                             r"financial|revenue|fp&a)\s+analyst\b", re.I)
+
+def non_function_hit(title):
+    """Return the blocking clause for title, or None. See NON_FUNCTION_RE."""
+    m = NON_FUNCTION_RE.search(title)
+    if m:
+        return m
+    if ANALYTICS_RE.search(title) and not ANALYST_ROLE_RE.search(title):
+        return ANALYTICS_RE.search(title)
+    return None
 # Left in deliberately, because Jordan has not ruled on them and they are real
 # adjacent careers rather than obvious noise: security engineering (Cloud/Infrastructure
 # Security Engineer), QA/Test (Quality Engineer, QA Tester), and staff/principal
@@ -407,7 +459,7 @@ def fit_bucket(p):
     lane = title_lane(title)
     if lane in REAL_LANES:
         # A topic lane plus a non-IT job function is not an IT Ops role.
-        if NON_FUNCTION_RE.search(title):
+        if non_function_hit(title):
             return "other"
         return "target"
     if lane in STRETCH_LANES:
@@ -743,15 +795,46 @@ def load_owner(postings):
     ow = postings.get("owner", {})
     return ow if isinstance(ow, dict) else {}
 
+def _atomic_write_json(path, data):
+    """Write via temp file + rename.
+
+    postings.json was found at 0 bytes on 2026-10-18 08:01 and state.json
+    at 0 bytes at 07:00 the same morning. A crash mid-write truncates the
+    file, and both are gitignored so there is no way back. An atomic
+    rename means the file is either the old version or the new one.
+    """
+    d = os.path.dirname(os.path.abspath(path)) or "."
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".tmp-", suffix=".json")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+def _load_json_safe(path):
+    """Load JSON, treating a missing or corrupt file as empty."""
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"WARNING: {path} is unreadable ({e}) - treating as empty")
+        return {}
+
+
 def load_state():
-    if os.path.exists(STATE):
-        with open(STATE) as f:
-            return json.load(f)
-    return {}
+    return _load_json_safe(STATE)
 
 def save_state(st):
-    with open(STATE, "w") as f:
-        json.dump(st, f, indent=2)
+    _atomic_write_json(STATE, st)
 
 def get(p, st):
     s = st.get(p["id"], {})
@@ -1843,12 +1926,25 @@ def cmd_shortlist(data):
     print("\nstability hints are in the exported tracker Shortlist sheet - verify manually.")
     print("Tip: `python3 pipeline.py rate` for hire-ease A-C list, then `stage <id>`.")
 
-def cmd_rate(data):
+def cmd_rate(data, show_all=False):
     """Hire-ease rated view: A = apply now, B = apply soon, C = stretch, D = skip.
-    Based on Jordan's real track record (resume + portfolio + github)."""
+    Based on Jordan's real track record (resume + portfolio + github).
+
+    Already-resolved postings are filtered out. Two Testlio evergreen posts
+    graded A after they had been marked `skip`, which read as two fresh leads
+    in a list whose whole purpose is "what do I apply to next". A role you
+    have already sent, skipped, or closed is not a next step.
+    """
+    st = load_state()
+    RESOLVED = {"submitted", "responded", "interview", "offer", "closed", "skip"}
     posts = [p for p in data["postings"] if fit_bucket(p) in ("target", "watch")]
     rows = []
+    hidden = 0
     for p in posts:
+        status = (st.get(p["id"]) or {}).get("status")
+        if status in RESOLVED and not show_all:
+            hidden += 1
+            continue
         grade, reasons = rate_posting(p)
         rows.append((grade, p, "; ".join(reasons)))
     rows.sort(key=lambda r: (r[0], not bool(r[1].get("salary_verified")), -(r[1].get("salary_max") or 0)))
@@ -1863,6 +1959,8 @@ def cmd_rate(data):
             print(f"      -> {why}")
     from collections import Counter
     print("\nby grade:", dict(Counter(g for g, _, _ in rows)))
+    if hidden:
+        print(f"({hidden} already sent/skipped/closed hidden - `pipeline.py rate --all` to include)")
     print("Tip: `pipeline.py review <id>` then `stage <id>` for any A/B.")
 
 def args_verbose():
@@ -2097,7 +2195,7 @@ def main():
     elif cmd == "kits":
         cmd_kits(data, owner)
     elif cmd == "rate":
-        cmd_rate(data)
+        cmd_rate(data, show_all=all_)
     elif cmd == "export":
         cmd_export(data, owner)
     else:

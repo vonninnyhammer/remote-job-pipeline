@@ -14,6 +14,7 @@ sites like Indeed/LinkedIn/ZipRecruiter):
   - Greenhouse boards   https://boards-api.greenhouse.io/v1/boards/<co>/jobs
   - Lever boards        https://api.lever.co/v0/postings/<co>?mode=json
   - SmartRecruiters     https://api.smartrecruiters.com/v1/companies/<co>/postings
+  - Ashby boards        https://api.ashbyhq.com/posting-api/job-board/<co>
 
 Filters:  remote = yes AND (US-based OR worldwide) AND salary >= $60k/yr
 (where the salary is posted).  Roles without a posted salary are kept only
@@ -24,7 +25,7 @@ Usage:
   python3 scrape.py sync             # fetch, filter, dedupe, merge into postings.json
   python3 scrape.py stats            # show counts per board
 """
-import json, os, re, sys, hashlib, datetime, time, html
+import json, os, re, sys, hashlib, datetime, time, html, tempfile
 import requests
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -44,12 +45,13 @@ TIMEOUT = 20
 GREENHOUSE_BOARDS = [
     "gitlab", "datadog", "dropbox", "hashicorp", "pulumi", "stripe",
     "notion", "airtable", "instacart", "databricks", "confluent",
-    "vercel", "esri", "chime",
+    "vercel", "esri", "chime", "contentful", "mercury",
 ]
-LEVER_BOARDS = [
-    "automattic", "grammarly", "webflow", "mercury", "contentful",
-    "sticker-mule", "signal", "planet",
-]
+# Checked 2026-11-06: webflow moved to Ashby and contentful/mercury to
+# Greenhouse; automattic, grammarly, sticker-mule and planet have no public
+# Lever, Greenhouse or Ashby board any more (every request was a 404).
+LEVER_BOARDS = ["signal"]
+ASHBY_BOARDS = ["webflow"]
 SMARTRECRUITERS_BOARDS = ["wework", "uber", "wix", "roku"]
 
 # --------------------------------------------------------------------------
@@ -181,18 +183,22 @@ def parse_salary(text):
 # role 'lane' classification (drives cover-letter angle + salary whitelist)
 # --------------------------------------------------------------------------
 LANES = [
-    ("AI/ML", r"\bai\b|\bai/|machine learning|\bml\b|llm|nlp|prompt|computer vision|\bocr\b|"
-              r"data scienti|mlops|\bmodels?\b|deep learning|genai|ai[-/ ]agent|ai[-/ ]native|"
+    ("AI/ML", r"\bai\b|\bai/|machine learning|\bml\b|\bllm\b|\bnlp\b|prompt|computer vision|\bocr\b|"
+              r"data scienti|mlops|\bmodels?\b|deep learning|\bgenai\b|ai[-/ ]agent|ai[-/ ]native|"
               r"\bcto\b|chief technology"),
-    ("Data", r"data (analyst|entry|engineer|ingest|processor|annotator)|sql\b|"
-             r"database|etl|bi ?developer|analytics|power bi|tableau|reporting|"
+    ("Data", r"data (analyst|entry|engineer|ingest|processor|annotator)|\bsql\b|"
+             r"database|\betl\b|\bbi\b ?developer|analytics|power bi|tableau|reporting|"
              r"(product|technical|revenue systems) analyst"),
-    ("QA/Test", r"\bqa\b|test(ing|er)?|quality (assurance|engineer|analyst|management)|"
-                r"\bqms\b|sdet|uat"),
-    ("DevOps/Cloud", r"devops|sre|site reliability|platform engineer|cloud|kubernetes|"
-                     r"docker|terraform|infrastructure( engineering)?|build engineer|ci/cd"),
-    ("IT Ops", r"\bit\b support|help ?desk|service ?desk|desktop|sysadmin|system admin|technician|noc|"
-               r"network admin|network engineer|it admin|msp|workday|systems? engineer|"
+    # "test" and "uat" must be word-bounded. Unbounded, "uat" matched inside
+    # "Graduate", "Graduates" and "Situation", and "test" inside "Latest" and
+    # "Greatest" - which filed "Graduate Transport Planner" and "Critical
+    # Situation Manager" as QA/Test roles and marked them fit-to-apply.
+    ("QA/Test", r"\bqa\b|\btest(?:ing|er)?\b|quality (assurance|engineer|analyst|management)|"
+                r"\bqms\b|\bsdet\b|\buat\b"),
+    ("DevOps/Cloud", r"devops|\bsre\b|site reliability|platform engineer|\bcloud\b|kubernetes|"
+                     r"docker|terraform|\binfrastructure( engineering)?|build engineer|ci/cd"),
+    ("IT Ops", r"\bit\b support|help ?desk|service ?desk|desktop|sysadmin|system admin|technician|"
+               r"\bnoc\b|network admin|network engineer|\bit\b admin|\bmsp\b|workday|systems? engineer|"
                r"(?<!data )support engineer|tier [12]|endpoint|intune|sccm|field ?engineer"),
     ("Customer Support", r"customer (support|success|service)|support specialist|"
                          r"(?!data )support (agent|rep)|client success|cs specialist|concierge"),
@@ -201,16 +207,35 @@ LANES = [
                      r"product (manager|owner|ops)|technical consultant"),
     ("Accounting/Finance", r"bookkeep|accountant|payroll|finance|controller|tax |"
                            r"financial (analyst|advisor)|\bfo\b|underwrit|actuar"),
-    ("Sales/BD", r"sales|account (executive|manager)|business development|bdr|sdr|"
+    ("Sales/BD", r"sales|account (executive|manager)|business development|\bbdr\b|\bsdr\b|"
                 r"partner manager"),
     ("Design", r"designer|design (engineer|lead)|\bux\b|\bui\b|graphic|visual design|illustrat"),
-    ("Marketing", r"marketing|marketer|\bseo\b|\bsem\b|social (media|comms)|brand|"
+    ("Marketing", r"marketing|marketer|\bseo\b|\bsem\b|social (media|comms)|\bbrand\b|"
                   r"growth (marketing|hacker)|content strategist|performance market"),
     ("Content/Creative", r"writer|editor|content (creator|writer)|copywriter|video|podcast|journal"),
     ("Admin Ops", r"virtual assistant|administrative|executive assistant|office (manager|admin)|"
                   r"reception"),
     ("HR", r"\bhr\b|recruit|talent|people (ops|partner)|coordinator people"),
     ("Legal/Compliance", r"paralegal|counsel|attorney|legal |compliance|risk|trust,? safety"),
+    # Added 2026-10-07: there was no Security lane at all, so every security
+    # req fell through to `other` - while Jordan holds kits for OpenAI
+    # "Security Engineer, Infrastructure Security" ($385k) and Vercel
+    # "Security Engineer, Cloud" ($110k), and test_classifier.py locks the
+    # $385k one as a pursue. Six security titles sat in `other` because of it.
+    #
+    # Deliberately LAST in the list: LANE_RE is first-match-wins, so putting it
+    # here means it only picks up titles that no other lane claims. It cannot
+    # steal "Director of Product Marketing - Cloud & OT Security" (DevOps/Cloud
+    # gets there first) or "Security Sales Engineer" (Sales/BD does).
+    #
+    # Title-only, by way of DESC_UNSAFE: "security" is boilerplate in every
+    # employer's description ("we take security seriously"), which is exactly
+    # the pass-2 pollution that made 538 AI/ML postings fiction on 2026-09-26.
+    ("Security", r"security (engineer|analyst|architect|operations|specialist)|"
+                 r"\bapplication security\b|\bappsec\b|\bsoc\b|soc analyst|"
+                 r"\bsiem\b|\bedr\b|\bxdr\b|\bgrc\b|incident response|"
+                 r"threat (intel|hunting)|penetration test|vulnerabilit|"
+                 r"detection (engineer|pipeline)|dark web"),
 ]
 LANE_RE = [(name, re.compile(pat, re.I)) for name, pat in LANES]
 
@@ -222,7 +247,7 @@ LANE_RE = [(name, re.compile(pat, re.I)) for name, pat in LANES]
 # regardless of what the person would actually be doing. Deriving this by
 # subtracting the buzzwords out of the alternation is a trap: it leaves empty
 # branches, and an empty branch matches every string.
-DESC_UNSAFE = {"AI/ML", "Data", "QA/Test", "DevOps/Cloud"}
+DESC_UNSAFE = {"AI/ML", "Data", "QA/Test", "DevOps/Cloud", "Security"}
 LANE_DESC_RE = [(n, rx) for n, rx in LANE_RE if n not in DESC_UNSAFE]
 
 # Talent marketplaces, not employers. They post invented "Senior Independent X
@@ -519,6 +544,30 @@ def fetch_lever(session):
             print(f"   [lever:{co}] skip ({type(e).__name__})")
     return out
 
+def fetch_ashby(session):
+    out = []
+    for co in ASHBY_BOARDS:
+        try:
+            d = fetch_json(session, f"https://api.ashbyhq.com/posting-api/job-board/{co}",
+                           params={"includeCompensation": "true"})
+            jobs = d.get("jobs", [])
+            for j in jobs:
+                if not j.get("isListed", True) or not (j.get("isRemote") or j.get("workplaceType") == "Remote"):
+                    continue
+                comp = (j.get("compensation") or {}).get("scrapeableCompensationSalarySummary")
+                out.append({
+                    "title": j.get("title"), "company": co.upper(),
+                    "location": j.get("location") or "", "url": j.get("jobUrl"),
+                    "salary_raw": comp or None,
+                    "tags": " ".join(x for x in (j.get("department"), j.get("team")) if x),
+                    "published_raw": (j.get("publishedAt", "") or "")[:10],
+                    "description": j.get("descriptionPlain") or clean_html(j.get("descriptionHtml", "")),
+                })
+            print(f"   [ashby:{co}] ok ({len(jobs)})")
+        except Exception as e:
+            print(f"   [ashby:{co}] skip ({type(e).__name__})")
+    return out
+
 def fetch_smartrecruiters(session):
     out = []
     for co in SMARTRECRUITERS_BOARDS:
@@ -551,6 +600,7 @@ SOURCES = [
     ("workingnomads", fetch_workingnomads),
     ("greenhouse", fetch_greenhouse),
     ("lever", fetch_lever),
+    ("ashby", fetch_ashby),
     ("smartrecruiters", fetch_smartrecruiters),
 ]
 
@@ -709,15 +759,45 @@ def _load_profile():
             return json.load(f)
     return {}
 
+def _atomic_write_json(path, data):
+    """Write via temp file + rename.
+
+    postings.json was found at 0 bytes on 2026-10-18 08:01. A crash
+    mid-write truncates it, and it is gitignored so there is no way back.
+    An atomic rename means the file is either the old version or the new.
+    """
+    d = os.path.dirname(os.path.abspath(path)) or "."
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".tmp-", suffix=".json")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
 def load_postings():
+    """Load the master, treating a missing or corrupt file as empty.
+
+    A 0-byte postings.json used to crash every sync, which meant the
+    remote pipeline silently stopped refreshing entirely.
+    """
     if os.path.exists(POSTINGS):
-        with open(POSTINGS) as f:
-            return json.load(f)
+        try:
+            with open(POSTINGS) as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"WARNING: {POSTINGS} is unreadable ({e}) - starting from empty")
     return {"owner_path": "./owner.json", "generated_by": "scrape.py", "postings": []}
 
 def save_postings(m):
-    with open(POSTINGS, "w") as f:
-        json.dump(m, f, indent=2)
+    _atomic_write_json(POSTINGS, m)
 
 def load_seen():
     if os.path.exists(SEEN):

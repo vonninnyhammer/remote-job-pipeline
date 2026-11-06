@@ -1,0 +1,26 @@
+<!doctype html><html><body><form>
+<label>First Name<input name="first_name" type="text"></label>
+<label>Last Name<input name="last_name" type="text"></label>
+<label>Email<input name="email" type="email"></label>
+<label>Current location<input name="location" type="text"></label>
+<fieldset><legend>Gender</legend>
+  <label><input type="radio" name="gender" value="female">Female</label>
+  <label><input type="radio" name="gender" value="male" checked>Male</label>
+  <label><input type="radio" name="gender" value="declined">Decline to self identify</label>
+</fieldset>
+<fieldset><legend>Are you transgender?</legend>
+  <label><input type="radio" name="tg" value="yes" checked>Yes</label>
+  <label><input type="radio" name="tg" value="no">No</label>
+  <label><input type="radio" name="tg" value="declined">Decline to self identify</label>
+</fieldset>
+<fieldset><legend>Are you a protected veteran?</legend>
+  <label><input type="radio" name="vet" value="yes" checked>Yes</label>
+  <label><input type="radio" name="vet" value="no">No</label>
+  <label><input type="radio" name="vet" value="declined">Decline to self identify</label>
+</fieldset>
+<label>Do you require a reasonable accommodation?
+  <input type="checkbox" name="eeo_accommodation" value="yes" checked></label>
+<label><input type="checkbox" name="consent" value="agree">I agree to the privacy policy</label>
+<label>Resume<input type="file" name="resume"></label>
+<button type="submit">Submit application</button>
+</form></body></html>

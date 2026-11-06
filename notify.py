@@ -3,21 +3,56 @@
 Response watcher + phone push
 =============================
 notify.py ping           send a test push to your phone (does NOT touch Gmail)
-notify.py watch          scan Gmail for replies to auto-sent applications,
-                         push a phone notification per response, and flip the
-                         matching posting to 'responded' in state.json.
+notify.py watch          scan Gmail for replies to applications, file every
+                         relevant one in the triage ledger, and phone-push
+                         only what actually needs Jordan (action / rejection)
 notify.py status         show what the watcher currently knows
 
-Ran from cron (e.g. every 30 min). Reads .env for Gmail + ntfy config.
+Ran from cron (e.g. every 15 min). Reads .env for Gmail + ntfy config.
+
+Every relevant reply — including auto-replies and ticket confirmations — goes
+into responses.json via triage.record(). Only action/rejection categories
+buzzer's phone, and only those ever surface in the morning digest. Nothing is
+pushed twice: the IMAP UID cursor moves forward regardless, and triage's
+alerted_at keeps the digest one-shot.
 """
-import argparse, datetime, email, json, os, re, sys
+import argparse, datetime, email, json, os, re, shutil, sys, tempfile, time
 from email.header import decode_header, make_header
 import imaplib
 import requests
 
 from conf import get_config, BASE
+import triage
 
 WATCHER_STATE = os.path.join(BASE, "watcher_state.json")
+# Every critical file in this pipeline is gitignored, so a truncated file is
+# a lost file - that is exactly what happened on 2026-10-18 and it cost four
+# days of mail visibility plus the whole posting master. These snapshots are
+# the only way back, so they are written on every successful run.
+SNAPSHOT_DIR = os.path.expanduser("~/.local/state/pipeline_snapshots/remote")
+SNAPSHOT_FILES = ("state.json", "responses.json", "postings.json",
+                  "watcher_state.json")
+
+
+def snapshot_state():
+    """Copy the critical JSON files aside, keeping the last 30 snapshots."""
+    try:
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        d = os.path.join(SNAPSHOT_DIR, stamp)
+        os.makedirs(d, exist_ok=True)
+        for name in SNAPSHOT_FILES:
+            src = os.path.join(BASE, name)
+            if os.path.exists(src) and os.path.getsize(src) > 0:
+                shutil.copy2(src, os.path.join(d, name))
+        snaps = sorted(os.listdir(SNAPSHOT_DIR))
+        for old in snaps[:-30]:
+            shutil.rmtree(os.path.join(SNAPSHOT_DIR, old), ignore_errors=True)
+    except Exception as e:                       # noqa: BLE001
+        print("snapshot skipped:", e)
+
+# What is worth Jordan's attention. Mirrors triage.ALERT_CATEGORIES so the
+# phone push and the morning digest never disagree about what counts.
+ALERT_CATEGORIES = ("action", "rejection")
 
 RESPONSE_KW = re.compile(
     r"interview|offer|invitation|application (status|update|received)|"
@@ -52,51 +87,79 @@ def _dec(txt):
         return str(txt)
 
 
+def _atomic_write_json(path, data):
+    """Write via temp file + rename.
+
+    state.json was found at 0 bytes on 2026-10-18 07:00 and postings.json
+    at 0 bytes at 08:01 the same morning - a crash mid-write truncates
+    them, and because they are gitignored there is no way back. An atomic
+    rename means the file is either the old version or the new one.
+    """
+    d = os.path.dirname(os.path.abspath(path)) or "."
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".tmp-", suffix=".json")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+def _load_json_safe(path):
+    """Load JSON, treating a missing or corrupt file as empty.
+
+    A 0-byte state.json used to crash the watcher on every run, which
+    silently blinded it to every job response until someone noticed.
+    """
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"WARNING: {path} is unreadable ({e}) - treating as empty")
+        return {}
+
+
 def load_state():
-    p = os.path.join(BASE, "state.json")
-    if os.path.exists(p):
-        with open(p) as f:
-            return json.load(f)
-    return {}
+    return _load_json_safe(os.path.join(BASE, "state.json"))
 
 
 def save_state(st):
-    with open(os.path.join(BASE, "state.json"), "w") as f:
-        json.dump(st, f, indent=2)
-
-
-def load_postings():
-    p = os.path.join(BASE, "postings.json")
-    if os.path.exists(p):
-        with open(p) as f:
-            return json.load(f).get("postings", [])
-    return []
+    _atomic_write_json(os.path.join(BASE, "state.json"), st)
 
 
 def load_watcher():
-    if os.path.exists(WATCHER_STATE):
-        with open(WATCHER_STATE) as f:
-            return json.load(f)
-    return {}
+    return _load_json_safe(WATCHER_STATE)
 
 
 def save_watcher(w):
-    with open(WATCHER_STATE, "w") as f:
-        json.dump(w, f, indent=2)
+    _atomic_write_json(WATCHER_STATE, w)
 
 
-def _body_snippet(msg):
-    """First ~240 chars of the first text/plain part."""
-    out = ""
+def _body_text(msg, limit=6000):
+    """Concatenated text/plain body. Enough for triage to classify on."""
+    chunks = []
+    total = 0
     for part in msg.walk():
-        if part.get_content_type() == "text/plain" and not out:
+        if part.get_content_type() == "text/plain":
             try:
-                out = part.get_payload(decode=True).decode(
+                txt = part.get_payload(decode=True).decode(
                     part.get_content_charset() or "utf-8", "replace")
             except Exception:
-                out = ""
-    out = re.sub(r"\s+", " ", out).strip()
-    return out[:240]
+                txt = ""
+            if txt:
+                chunks.append(txt)
+                total += len(txt)
+        if total >= limit:
+            break
+    out = re.sub(r"\s+", " ", " ".join(chunks)).strip()
+    return out[:limit]
 
 
 # ---------------------------------------------------------------------------
@@ -129,8 +192,14 @@ def cmd_status(args):
     return 0
 
 
-def _classify(subject, refs, in_reply_to):
-    """Return (matched_posting_ids_or_None, is_keyword_reply)."""
+def _classify(subject, body, refs, in_reply_to):
+    """-> (matched_posting_ids, keyword_hit)
+
+    matched: an exact Message-ID tie back to an auto-sent application, the
+    reliable path. keyword_hit: RESPONSE_KW on subject+body, which is what
+    catches a recruiter writing in cold with no thread to inherit — that
+    branch existed but was never reachable, so those replies were dropped.
+    """
     st = load_state()
     refs_text = " ".join(filter(None, [in_reply_to, refs]))
     for pid, e in st.items():
@@ -138,14 +207,40 @@ def _classify(subject, refs, in_reply_to):
         if not sent_mid:
             continue
         base = re.sub(r"<|>", "", sent_mid)
-        if base in refs_text or f"<{base}>" in refs_text or base in in_reply_to or "":
-            return [pid], True, False
-    return None, False, False
+        if base and (base in refs_text or base in in_reply_to):
+            return [pid], bool(RESPONSE_KW.search(subject or "")
+                               or RESPONSE_KW.search(body or ""))
+    return [], bool(RESPONSE_KW.search(subject or "")
+                    or RESPONSE_KW.search(body or ""))
+
+
+def _imap_connect(retries=6, wait=20):
+    """Open IMAP to Gmail, tolerating a network that is not up yet.
+
+    This laptop sleeps. When it wakes, cron can fire before the Wi-Fi
+    association and DHCP lease are done, and the first getaddrinfo fails
+    with gaierror EAI_AGAIN. That happened 78 runs in a row between
+    2026-10-18 and 2026-10-22 - the watcher was blind for four days,
+    including the day Jack Henry sent the denial. A pending application
+    that nobody watches dies of neglect rather than of merit, so this
+    retries with a backoff instead of giving up on the first error.
+    """
+    last = None
+    for attempt in range(1, retries + 1):
+        try:
+            return imaplib.IMAP4_SSL("imap.gmail.com", 993, timeout=120)
+        except Exception as e:                    # noqa: BLE001
+            last = e
+            print(f"IMAP connect attempt {attempt}/{retries} failed: "
+                  f"{type(e).__name__}: {e}")
+            if attempt < retries:
+                time.sleep(wait)
+    raise last
 
 
 def cmd_watch(args):
     cfg = get_config()
-    m = imaplib.IMAP4_SSL("imap.gmail.com", 993)
+    m = _imap_connect()
     try:
         m.login(cfg["user"], cfg["pw"])
     except Exception as e:
@@ -162,18 +257,20 @@ def cmd_watch(args):
     if not last_uid:
         save_watcher({"last_uid": max(uids), "baseline_at": datetime.datetime.now().isoformat(timespec="minutes")})
         print(f"baseline set at UID {max(uids)} ({len(uids)} msgs in box) - already-read backlog will not notify")
+        snapshot_state()
         m.logout()
         return 0
 
     new_uids = [u for u in uids if u > last_uid]
     if not new_uids:
         print("no new mail since last check")
+        snapshot_state()
         m.logout()
         return 0
 
     st = load_state()
-    postings = {p["id"]: p for p in load_postings()}
     hits = 0
+    pushed = 0
     max_new = max(new_uids)
     for u in new_uids:
         status, data = m.uid("fetch", str(u), "(RFC822)")
@@ -189,23 +286,45 @@ def cmd_watch(args):
         refs = _dec(msg.get("References"))
         in_reply = _dec(msg.get("In-Reply-To"))
         msgid = _dec(msg.get("Message-ID"))
-        snippet = _body_snippet(msg)
+        body = _body_text(msg)
+        snippet = body[:240]
 
-        matched, keyword, _ = _classify(subj, refs, in_reply)
-        relevant = matched or (keyword)
+        matched, keyword = _classify(subj, body, refs, in_reply)
+        verdict = triage.classify(subj, body, frm)
+        relevant = bool(matched) or keyword or verdict["category"] in ALERT_CATEGORIES
         if not relevant:
             continue
 
-        # match posting by recency/rules is handled above; mark as responded
         hits += 1
-        body = f"From: {frm}\nSubject: {subj}\nDate: {date}\nUID: {u}\n\n{snippet or '(no text body)'}"
-        code, txt = ntfy(cfg, f"Job response: {subj[:90]}", body,
-                         priority="high", tags=["envelope"])
-        print(f"  pushed UID {u}: {subj[:60]}  -> ntfy {code}")
-        if code != 200:
-            print(f"    push problem: {txt}")
+        try:
+            key, entry = triage.record(
+                pid=(matched[0] if matched else None), uid=u, msgid=msgid,
+                frm=frm, subject=subj, date=date, body=body)
+        except ValueError as e:
+            print(f"  ledger skip UID {u}: {e}")
+            entry = None
 
-        if matched:
+        # The phone buzzes only for things that actually need him. Auto-replies
+        # and ticket confirmations land in the ledger silently, so the morning
+        # digest can prove they happened without ever waking him for them.
+        if entry and entry["category"] in ALERT_CATEGORIES:
+            summary = f"From: {frm}\nSubject: {subj}\nDate: {date}\n\n"
+            if entry.get("action"):
+                summary += f"Action: {entry['action']}\n"
+            if entry.get("deadline"):
+                summary += f"By: {entry['deadline']}\n"
+            summary += f"\n{snippet or '(no text body)'}"
+            code, txt = ntfy(cfg, f"Job {entry['category']}: {subj[:85]}", summary,
+                             priority="high", tags=["envelope"])
+            print(f"  pushed UID {u} [{entry['category']}]: {subj[:55]}  -> ntfy {code}")
+            if code != 200:
+                print(f"    push problem: {txt}")
+            else:
+                pushed += 1
+
+        # Flip the posting only when a person answered. An auto-ack marking a
+        # job 'responded' is what made silent applications look handled.
+        if matched and entry and entry["category"] != "auto":
             for pid in matched:
                 e = st.setdefault(str(pid), {})
                 if e.get("status") not in ("interview", "offer", "closed", "skip"):
@@ -216,7 +335,9 @@ def cmd_watch(args):
 
     save_state(st)
     save_watcher({"last_uid": max_new, "last_run": datetime.datetime.now().isoformat(timespec="minutes")})
-    print(f"done: {hits} response(s) found, {len(new_uids)} new msgs scanned, cursor -> {max_new}")
+    snapshot_state()
+    print(f"done: {hits} relevant reply(s), {pushed} pushed, "
+          f"{len(new_uids)} new msgs scanned, cursor -> {max_new}")
     m.logout()
     return 0
 

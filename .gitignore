@@ -13,6 +13,9 @@ screening.json
 # runtime caches/state, regenerable, not source
 watcher_state.json
 ats_cache.json
+# triage ledger: verbatim inbound reply text + classification. Same privacy
+# class as state.json - live personal data, never publish.
+responses.json
 
 # secrets (never publish)
 .env
